@@ -73,8 +73,8 @@ if start_button:
         try:
             run1 = client.actor(BESTSELLERS_ACTOR).call(run_input={
                 "categoryUrls": [{"url": url_input}],
-                "marketplace": "JP",
-                "maxItems": 20,
+                "amazonMarketplace": "JP",
+                "maxItemsPerCategory": 20,
             })
             ranking_items = list(client.dataset(run1["defaultDatasetId"]).list_items().items)
         except Exception as e:
