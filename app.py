@@ -72,7 +72,7 @@ if start_button:
 
         try:
             run1 = client.actor(BESTSELLERS_ACTOR).call(run_input={
-                "categoryUrls": [{"url": url_input}],
+               "categoryUrls": [url_input],
                 "amazonMarketplace": "JP",
                 "maxItemsPerCategory": 20,
             })
