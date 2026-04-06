@@ -9,6 +9,7 @@ st.set_page_config(page_title="EC市場リサーチ自動化ツール", layout="
 
 BESTSELLERS_ACTOR = "automation-lab/amazon-bestsellers-scraper"
 REVIEWS_ACTOR     = "automation-lab/amazon-reviews-scraper"
+DETAILS_ACTOR     = "wilico/amazon-price-scraper"
 
 try:
     apify_token = st.secrets["APIFY_TOKEN"]
@@ -67,7 +68,7 @@ if start_button:
 
         # STEP 1: ランキング取得
         step1 = st.empty()
-        step1.info("⏳ STEP 1/2：ランキングデータを取得中...")
+        step1.info("⏳ STEP 1/3：ランキングデータを取得中...")
 
         try:
             run1 = client.actor(BESTSELLERS_ACTOR).call(run_input={
@@ -86,18 +87,24 @@ if start_button:
 
         step1.success(f"✅ STEP 1完了：{len(ranking_items)}件のランキングデータを取得しました。")
 
-        # ASINリスト（Actorレスポンスを優先、なければURLから抽出）
+        # ASINリスト作成
         asin_list = [
             item.get('asin') or extract_asin(item.get('url', ''))
             for item in ranking_items
         ]
         asin_list = [a for a in asin_list if a]
 
-        # STEP 2: 全ASINを並列起動してから一括待機
-        step2 = st.empty()
-        step2.info("⏳ STEP 2/2：レビューデータを取得中...（1〜2分かかります）")
+        # URLリスト作成（商品詳細用）
+        url_list = [
+            f"https://www.amazon.co.jp/dp/{asin}"
+            for asin in asin_list
+        ]
 
-        pending_runs = {}
+        # STEP 2: レビューと商品詳細を並列起動
+        step2 = st.empty()
+        step2.info("⏳ STEP 2/3：レビューデータを取得中...（1〜2分かかります）")
+
+        pending_reviews = {}
         for asin in asin_list:
             try:
                 run = client.actor(REVIEWS_ACTOR).start(run_input={
@@ -105,21 +112,50 @@ if start_button:
                     "marketplace": "JP",
                     "maxReviewsPerProduct": 20,
                 })
-                pending_runs[asin] = run["id"]
+                pending_reviews[asin] = run["id"]
             except Exception:
                 pass
 
-        reviews_by_asin = {}
-        for asin, run_id in pending_runs.items():
+        step3 = st.empty()
+        step3.info("⏳ STEP 3/3：商品詳細データを取得中...")
+
+        pending_details = {}
+        for url in url_list:
+            asin = extract_asin(url)
             try:
-                finished_run = client.run(run_id).wait_for_finish()
-                items = list(client.dataset(finished_run["defaultDatasetId"]).list_items().items)
+                run = client.actor(DETAILS_ACTOR).start(run_input={
+                    "startUrls": [url],
+                    "maxItemsPerStartUrl": 1,
+                })
+                pending_details[asin] = run["id"]
+            except Exception:
+                pass
+
+        # レビュー完了待ち
+        reviews_by_asin = {}
+        for asin, run_id in pending_reviews.items():
+            try:
+                finished = client.run(run_id).wait_for_finish()
+                items = list(client.dataset(finished["defaultDatasetId"]).list_items().items)
                 if items:
                     reviews_by_asin[asin] = items
             except Exception:
                 pass
 
         step2.success(f"✅ STEP 2完了：{len(reviews_by_asin)}/{len(asin_list)}商品のレビューを取得しました。")
+
+        # 商品詳細完了待ち
+        details_by_asin = {}
+        for asin, run_id in pending_details.items():
+            try:
+                finished = client.run(run_id).wait_for_finish()
+                items = list(client.dataset(finished["defaultDatasetId"]).list_items().items)
+                if items:
+                    details_by_asin[asin] = items[0]
+            except Exception:
+                pass
+
+        step3.success(f"✅ STEP 3完了：{len(details_by_asin)}/{len(asin_list)}商品の詳細データを取得しました。")
 
         # データ結合
         rows = []
@@ -134,9 +170,12 @@ if start_button:
 
             reviews      = reviews_by_asin.get(asin, [])
             reviews_text = process_reviews(reviews)
+            details      = details_by_asin.get(asin, {})
+            description  = details.get('description', '') or ""
 
             if not title:        備考.append("商品名取得失敗")
             if not reviews_text: 備考.append("レビュー取得失敗")
+            if not description:  備考.append("商品詳細取得失敗")
             if title:
                 success_count += 1
 
@@ -150,6 +189,7 @@ if start_button:
                 "平均星評価":           item.get('rating', ''),
                 "総レビュー数":         item.get('reviewCount', ''),
                 "カテゴリ":             item.get('categoryName', ''),
+                "商品の特徴（仕様）":   description[:500] if description else "",
                 "顧客の声（レビュー）": reviews_text,
                 "備考（ステータス）":   " / ".join(備考),
             })
