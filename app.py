@@ -89,34 +89,35 @@ if start_button:
 
         step1.success(f"✅ STEP 1完了：{len(ranking_items)}件のランキングデータを取得しました。")
 
-        # STEP 2: レビュー取得
-        step2 = st.empty()
-        step2.info("⏳ STEP 2/2：各商品のレビューを取得中...（1〜3分かかります）")
+        # STEP 2: レビューを1件ずつ取得
+        step2_text = st.empty()
+        step2_progress = st.progress(0)
 
+        reviews_by_asin = {}
         asin_list = []
         for item in ranking_items:
             asin = extract_asin(item.get('url', ''))
             if asin:
                 asin_list.append(asin)
 
-        reviews_by_asin = {}
-        if asin_list:
+        total_asins = len(asin_list)
+        for i, asin in enumerate(asin_list):
+            step2_text.info(f"⏳ STEP 2/2：レビュー取得中... ({i+1}/{total_asins}件目)")
+            step2_progress.progress((i + 1) / total_asins)
             try:
                 run2 = client.actor(REVIEWS_ACTOR).call(run_input={
-                    "asins": asin_list,
+                    "asins": [asin],
                     "marketplace": "JP",
                     "maxReviewsPerProduct": 20,
                 })
                 review_items = list(client.dataset(run2["defaultDatasetId"]).list_items().items)
-                for r in review_items:
-                    asin = r.get('asin', '')
-                    if asin not in reviews_by_asin:
-                        reviews_by_asin[asin] = []
-                    reviews_by_asin[asin].append(r)
-            except Exception as e:
-                step2.warning(f"⚠️ レビュー取得エラー（レビューなしで続行）：{e}")
+                if review_items:
+                    reviews_by_asin[asin] = review_items
+            except Exception:
+                pass
 
-        step2.success(f"✅ STEP 2完了：{len(reviews_by_asin)}商品のレビューを取得しました。")
+        step2_text.success(f"✅ STEP 2完了：{len(reviews_by_asin)}/{total_asins}商品のレビューを取得しました。")
+        step2_progress.empty()
 
         # データ結合
         rows = []
@@ -153,7 +154,6 @@ if start_button:
         df = pd.DataFrame(rows)
         st.session_state['result_df'] = df
 
-        # 結果表示
         total = len(ranking_items)
         if success_count == total:
             st.success(f"✅ {total}件中 {success_count}件のデータ取得に成功しました。")
@@ -163,7 +163,6 @@ if start_button:
         st.subheader("📊 取得結果プレビュー（上位10件）")
         st.dataframe(df.head(10), use_container_width=True)
 
-        # Excelダウンロード
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='リサーチ結果')
