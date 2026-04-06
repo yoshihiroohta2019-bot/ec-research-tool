@@ -9,7 +9,7 @@ st.set_page_config(page_title="EC市場リサーチ自動化ツール", layout="
 
 BESTSELLERS_ACTOR = "automation-lab/amazon-bestsellers-scraper"
 REVIEWS_ACTOR     = "automation-lab/amazon-reviews-scraper"
-DETAILS_ACTOR     = "wilico/amazon-price-scraper"
+DETAILS_ACTOR     = "apify/amazon-product-scraper"
 
 try:
     apify_token = st.secrets["APIFY_TOKEN"]
@@ -50,6 +50,12 @@ def process_reviews(reviews):
         result.append(f"【不満】・{body} (星{r.get('rating')})")
     return "\n".join(result)
 
+def extract_features(details):
+    features = details.get('features') or details.get('bullets') or details.get('description') or []
+    if isinstance(features, list):
+        return '\n'.join(str(f) for f in features)[:500]
+    return str(features)[:500] if features else ""
+
 def build_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -88,7 +94,7 @@ if start_button:
 
         step1.success(f"✅ STEP 1完了：{len(ranking_items)}件のランキングデータを取得しました。")
 
-        # ASINリスト・URLリスト作成
+        # ASINリスト作成
         asin_list = [
             item.get('asin') or extract_asin(item.get('url', ''))
             for item in ranking_items
@@ -120,8 +126,7 @@ if start_button:
         for asin in asin_list:
             try:
                 run = client.actor(DETAILS_ACTOR).start(run_input={
-                    "startUrls": [f"https://www.amazon.co.jp/dp/{asin}"],
-                    "maxItemsPerStartUrl": 1,
+                    "startUrls": [{"url": f"https://www.amazon.co.jp/dp/{asin}"}],
                 })
                 pending_details[asin] = run["id"]
             except Exception:
@@ -167,7 +172,7 @@ if start_button:
             reviews      = reviews_by_asin.get(asin, [])
             reviews_text = process_reviews(reviews)
             details      = details_by_asin.get(asin, {})
-            description  = str(details.get('description', '') or "")[:500]
+            description  = extract_features(details)
 
             if not title:        備考.append("商品名取得失敗")
             if not reviews_text: 備考.append("レビュー取得失敗")
