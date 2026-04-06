@@ -67,16 +67,18 @@ if start_button:
     else:
         client = ApifyClient(apify_token)
 
+        # STEP 1: ランキング取得
         step1 = st.empty()
         step1.info("⏳ STEP 1/2：ランキングデータを取得中...")
 
         try:
             run1 = client.actor(BESTSELLERS_ACTOR).call(run_input={
-               "categoryUrls": [url_input],
+                "categoryUrls": [url_input],
                 "amazonMarketplace": "JP",
                 "maxItemsPerCategory": 20,
             })
             ranking_items = list(client.dataset(run1["defaultDatasetId"]).list_items().items)
+            ranking_items = ranking_items[:20]
         except Exception as e:
             step1.error(f"ランキング取得エラー：{e}")
             st.stop()
@@ -87,6 +89,7 @@ if start_button:
 
         step1.success(f"✅ STEP 1完了：{len(ranking_items)}件のランキングデータを取得しました。")
 
+        # STEP 2: レビュー取得
         step2 = st.empty()
         step2.info("⏳ STEP 2/2：各商品のレビューを取得中...（1〜3分かかります）")
 
@@ -103,7 +106,6 @@ if start_button:
                     "asins": asin_list,
                     "marketplace": "JP",
                     "maxReviewsPerProduct": 20,
-                    "sort": "helpful",
                 })
                 review_items = list(client.dataset(run2["defaultDatasetId"]).list_items().items)
                 for r in review_items:
@@ -112,15 +114,16 @@ if start_button:
                         reviews_by_asin[asin] = []
                     reviews_by_asin[asin].append(r)
             except Exception as e:
-                step2.warning(f"⚠️ レビュー取得でエラーが発生しました（レビューなしで続行）：{e}")
+                step2.warning(f"⚠️ レビュー取得エラー（レビューなしで続行）：{e}")
 
         step2.success(f"✅ STEP 2完了：{len(reviews_by_asin)}商品のレビューを取得しました。")
 
+        # データ結合
         rows = []
         success_count = 0
 
         for item in ranking_items:
-            url   = item.get('url', '')
+            url   = item.get('url', '').replace('amazon.com/dp', 'amazon.co.jp/dp')
             asin  = extract_asin(url) or ""
             title = item.get('name', '')
             備考  = []
@@ -148,7 +151,9 @@ if start_button:
             })
 
         df = pd.DataFrame(rows)
+        st.session_state['result_df'] = df
 
+        # 結果表示
         total = len(ranking_items)
         if success_count == total:
             st.success(f"✅ {total}件中 {success_count}件のデータ取得に成功しました。")
@@ -158,6 +163,7 @@ if start_button:
         st.subheader("📊 取得結果プレビュー（上位10件）")
         st.dataframe(df.head(10), use_container_width=True)
 
+        # Excelダウンロード
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='リサーチ結果')
@@ -168,6 +174,23 @@ if start_button:
             file_name=f"amazon_research_{int(time.time())}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+# --- 結果の保持表示 ---
+if 'result_df' in st.session_state and not start_button:
+    df = st.session_state['result_df']
+    st.info("💾 直前のリサーチ結果を表示しています。")
+    st.dataframe(df.head(10), use_container_width=True)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='リサーチ結果')
+
+    st.download_button(
+        label="📥 Excelファイルをダウンロード（保持中）",
+        data=output.getvalue(),
+        file_name=f"amazon_research_{int(time.time())}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 st.divider()
 st.caption("© 2026 ECリサーチ自動化ツール フェーズ1")
