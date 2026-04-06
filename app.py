@@ -5,23 +5,19 @@ import io
 import time
 import re
 
-# --- 設定 ---
 st.set_page_config(page_title="EC市場リサーチ自動化ツール", layout="wide")
 
 BESTSELLERS_ACTOR = "automation-lab/amazon-bestsellers-scraper"
 REVIEWS_ACTOR     = "automation-lab/amazon-reviews-scraper"
 
-# --- APIトークン読み込み ---
 try:
     apify_token = st.secrets["APIFY_TOKEN"]
 except Exception:
     apify_token = None
 
-# --- タイトル ---
 st.title("📦 EC市場リサーチ自動化ツール")
 st.markdown("AmazonのランキングURLを入力すると、上位20件の競合データ＋レビューを自動抽出してExcelで出力します。")
 
-# --- URL入力 ---
 url_input = st.text_input(
     "AmazonのランキングURLを入力してください",
     placeholder="https://www.amazon.co.jp/gp/bestsellers/beauty/"
@@ -29,24 +25,21 @@ url_input = st.text_input(
 
 start_button = st.button("🚀 リサーチ開始", type="primary")
 
-# --- ASINの抽出 ---
 def extract_asin(url):
     match = re.search(r'/dp/([A-Z0-9]{10})', url)
     return match.group(1) if match else None
 
-# --- 価格の整形 ---
 def format_price(price_string):
     if not price_string:
-        return ""
+        return None
     cleaned = re.sub(r'[^\d]', '', str(price_string))
-    return int(cleaned) if cleaned else ""
+    return int(cleaned) if cleaned else None
 
-# --- レビュー抽出ロジック ---
 def process_reviews(reviews):
     if not reviews:
         return ""
-    good = [r for r in reviews if r.get('rating', 0) >= 4][:3]
-    bad  = [r for r in reviews if r.get('rating', 0) <= 3][:2]
+    good = [r for r in reviews if r.get('rating', 0) in (4, 5)][:3]
+    bad  = [r for r in reviews if 1 <= r.get('rating', 0) <= 3][:2]
     result = []
     for r in good:
         body = str(r.get('body', ''))[:150]
@@ -56,7 +49,12 @@ def process_reviews(reviews):
         result.append(f"【不満】・{body} (星{r.get('rating')})")
     return "\n".join(result)
 
-# --- メイン処理 ---
+def build_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='リサーチ結果')
+    return output.getvalue()
+
 if start_button:
     if not apify_token:
         st.error("APIトークンが設定されていません。管理者に連絡してください。")
@@ -77,8 +75,7 @@ if start_button:
                 "amazonMarketplace": "JP",
                 "maxItemsPerCategory": 20,
             })
-            ranking_items = list(client.dataset(run1["defaultDatasetId"]).list_items().items)
-            ranking_items = ranking_items[:20]
+            ranking_items = list(client.dataset(run1["defaultDatasetId"]).list_items().items)[:20]
         except Exception as e:
             step1.error(f"ランキング取得エラー：{e}")
             st.stop()
@@ -89,47 +86,53 @@ if start_button:
 
         step1.success(f"✅ STEP 1完了：{len(ranking_items)}件のランキングデータを取得しました。")
 
-        # STEP 2: レビューを1件ずつ取得
-        step2_text = st.empty()
-        step2_progress = st.progress(0)
+        # ASINリスト（Actorレスポンスを優先、なければURLから抽出）
+        asin_list = [
+            item.get('asin') or extract_asin(item.get('url', ''))
+            for item in ranking_items
+        ]
+        asin_list = [a for a in asin_list if a]
 
-        reviews_by_asin = {}
-        asin_list = []
-        for item in ranking_items:
-            asin = extract_asin(item.get('url', ''))
-            if asin:
-                asin_list.append(asin)
+        # STEP 2: 全ASINを並列起動してから一括待機
+        step2 = st.empty()
+        step2.info("⏳ STEP 2/2：レビューデータを取得中...（1〜2分かかります）")
 
-        total_asins = len(asin_list)
-        for i, asin in enumerate(asin_list):
-            step2_text.info(f"⏳ STEP 2/2：レビュー取得中... ({i+1}/{total_asins}件目)")
-            step2_progress.progress((i + 1) / total_asins)
+        pending_runs = {}
+        for asin in asin_list:
             try:
-                run2 = client.actor(REVIEWS_ACTOR).call(run_input={
+                run = client.actor(REVIEWS_ACTOR).start(run_input={
                     "asins": [asin],
                     "marketplace": "JP",
                     "maxReviewsPerProduct": 20,
                 })
-                review_items = list(client.dataset(run2["defaultDatasetId"]).list_items().items)
-                if review_items:
-                    reviews_by_asin[asin] = review_items
+                pending_runs[asin] = run["id"]
             except Exception:
                 pass
 
-        step2_text.success(f"✅ STEP 2完了：{len(reviews_by_asin)}/{total_asins}商品のレビューを取得しました。")
-        step2_progress.empty()
+        reviews_by_asin = {}
+        for asin, run_id in pending_runs.items():
+            try:
+                finished_run = client.run(run_id).wait_for_finish()
+                items = list(client.dataset(finished_run["defaultDatasetId"]).list_items().items)
+                if items:
+                    reviews_by_asin[asin] = items
+            except Exception:
+                pass
+
+        step2.success(f"✅ STEP 2完了：{len(reviews_by_asin)}/{len(asin_list)}商品のレビューを取得しました。")
 
         # データ結合
         rows = []
         success_count = 0
 
         for item in ranking_items:
-            url   = item.get('url', '').replace('amazon.com/dp', 'amazon.co.jp/dp')
-            asin  = extract_asin(url) or ""
+            url   = item.get('url', '')
+            url   = re.sub(r'amazon\.[a-z.]+/dp', 'amazon.co.jp/dp', url) if url else ''
+            asin  = item.get('asin') or extract_asin(url) or ""
             title = item.get('name', '')
             備考  = []
 
-            reviews = reviews_by_asin.get(asin, [])
+            reviews      = reviews_by_asin.get(asin, [])
             reviews_text = process_reviews(reviews)
 
             if not title:        備考.append("商品名取得失敗")
@@ -163,30 +166,20 @@ if start_button:
         st.subheader("📊 取得結果プレビュー（上位10件）")
         st.dataframe(df.head(10), use_container_width=True)
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='リサーチ結果')
-
         st.download_button(
             label="📥 Excelファイルをダウンロード",
-            data=output.getvalue(),
+            data=build_excel(df),
             file_name=f"amazon_research_{int(time.time())}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# --- 結果の保持表示 ---
 if 'result_df' in st.session_state and not start_button:
     df = st.session_state['result_df']
     st.info("💾 直前のリサーチ結果を表示しています。")
     st.dataframe(df.head(10), use_container_width=True)
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='リサーチ結果')
-
     st.download_button(
         label="📥 Excelファイルをダウンロード（保持中）",
-        data=output.getvalue(),
+        data=build_excel(df),
         file_name=f"amazon_research_{int(time.time())}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
