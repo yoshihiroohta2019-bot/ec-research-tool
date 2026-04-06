@@ -6,7 +6,7 @@ import time
 
 st.set_page_config(page_title="ECリサーチ自動化ツール", layout="wide")
 
-apify_token = st.sidebar.text_input("Apify API Token", type="password")
+apify_token = st.secrets["APIFY_TOKEN"]
 actor_id = "XVDTQc4a7MDTqSTMJ"
 
 st.title("📦 EC市場リサーチ自動化ツール")
